@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>The Outlier Astronaut</title>
+    <style>
+        body { margin: 0; padding: 0; background: #02040a; color: #00f3ff; font-family: 'Courier New', Courier, monospace; overflow: hidden; }
+        #intro { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(2,4,10,0.96); z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 30px; box-sizing: border-box; }
+        #intro button { background: #00f3ff; color: #000; padding: 15px 35px; font-size: 20px; font-weight: bold; border: none; cursor: pointer; margin-top: 25px; box-shadow: 0 0 15px #00f3ff; transition: 0.2s; }
+        #intro button:hover { background: #fff; box-shadow: 0 0 25px #fff; }
+        #game-layout { display: flex; width: 100vw; height: 100vh; }
+        #canvas-container { width: 60vw; height: 100vh; position: relative; }
+        #ui-panel { width: 40vw; height: 100vh; background: #060b19; border-left: 2px solid #00f3ff; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; overflow-y: auto; }
+        .bar-bg { width: 100%; height: 20px; background: #111a33; border: 1px solid #00f3ff; margin: 5px 0 15px 0; }
+        #fuel-bar { height: 100%; width: 100%; background: #00f3ff; transition: width 0.2s; }
+        #hull-bar { height: 100%; width: 100%; background: #ff3366; transition: width 0.2s; }
+        .formula-box { background: #03060f; border: 1px dashed #ffaa00; padding: 10px; font-size: 11px; margin-bottom: 10px; color: #ffaa00; line-height: 1.4; }
+        #log { height: 120px; overflow-y: auto; background: #02040a; border: 1px solid #334466; padding: 8px; font-size: 12px; }
+        .fp { color: #ffaa00; }
+        .fn { color: #ff3366; }
+        .ok { color: #00ffaa; opacity: 0.7; }
+    </style>
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+<div id="intro">
+    <h1>THE OUTLIER ASTRONAUT</h1>
+    <div style="max-width: 650px; line-height: 1.7; font-size: 15px; text-align: left; background: #070e22; padding: 20px; border: 1px solid #00f3ff;">
+        <p><b>Mission Briefing:</b> You pilot a spaceship navigating a cosmic debris field with noisy sensor data.</p>
+        <p><b>Controls:</b> Slide the Z-Score threshold. Use <b>UP / DOWN arrow keys</b> or drag the spaceship manually to dodge hazards.</p>
+        <p><b>Data Science Rules:</b></p>
+        <ul>
+            <li><span class="fp">False Positive (Z too low):</span> Ship dodges harmless background noise, wasting fuel.</li>
+            <li><span class="fn">False Negative (Z too high):</span> Ship ignores asteroids, taking severe hull damage.</li>
+            <li><b>Sweet Spot:</b> Set Z between 2.0 and 3.0 using the empirical rule ($\mu \pm 2\sigma$).</li>
+        </ul>
+    </div>
+    <button onclick="startGame()">INITIATE MISSION</button>
+</div>
+
+<div id="game-layout">
+    <div id="canvas-container"></div>
+    <div id="ui-panel">
+        <div>
+            <h2>HOLOGRAPHIC CONSOLE</h2>
+            <div class="formula-box">
+                <b>Pandas Backend Formulas:</b><br>
+                Rolling Mean ($\mu$) = $\frac{1}{n}\sum x_i$<br>
+                Std Deviation ($\sigma$) = $\sqrt{\frac{\sum(x_i - \mu)^2}{n-1}}$<br>
+                Z-Score ($Z$) = $\frac{x_i - \mu}{\sigma}$
+            </div>
+            
+            <label>HULL INTEGRITY (False Negatives Drop This)</label>
+            <div class="bar-bg"><div id="hull-bar"></div></div>
+            
+            <label>FUEL RESERVES (False Positives Drop This)</label>
+            <div class="bar-bg"><div id="fuel-bar"></div></div>
+            
+            <div style="margin: 15px 0;">
+                <label>Z-SCORE THRESHOLD: <span id="z-val" style="color:#ffaa00; font-weight:bold;">2.5</span></label><br>
+                <input type="range" id="z-slider" min="1.0" max="4.0" step="0.1" value="2.5" style="width:100%; accent-color:#ffaa00;" oninput="document.getElementById('z-val').innerText = this.value">
+                <div style="font-size: 10px; color: #88aaff; display:flex; justify-content:space-between; margin-top:2px;">
+                  <span>1.0 (Under-filter / Danger)</span>
+                  <span>4.0 (Over-filter / Fuel Drain)</span>
+                </div>
+            </div>
+        </div>
+        
+        <div>
+            <label>LIVE EVALUATION LOG (.loc / Z-TRANSFORM)</label>
+            <div id="log"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let fuel = 100, hull = 100, step = 0, gameActive = false;
+    let scene, camera, renderer, ship, obstacles = [];
+    let keyUp = false, keyDown = false;
+
+    function initThree() {
+        const container = document.getElementById('canvas-container');
+        scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x02040a, 0.015);
+
+        camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000);
+        camera.position.set(0, 3, 12);
+        camera.lookAt(0, 0, -5);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        container.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        scene.add(ambientLight);
+        const pointLight = new THREE.PointLight(0x00f3ff, 2, 50);
+        pointLight.position.set(0, 10, 10);
+        scene.add(pointLight);
+
+        // Cartoon 3D Ship (Stylized Retro UFO / Fighter)
+        const shipGroup = new THREE.Group();
+        const bodyGeo = new THREE.ConeGeometry(1.2, 3, 4);
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x00f3ff, roughness: 0.3, metalness: 0.8 });
+        const body = new THREE.Mesh(bodyGeo, bodyMat);
+        body.rotation.x = Math.PI / 2;
+        shipGroup.add(body);
+
+        const cockpitGeo = new THREE.SphereGeometry(0.6, 16, 16);
+        const cockpitMat = new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0xff5500, roughness: 0.2 });
+        const cockpit = new THREE.Mesh(cockpitGeo, cockpitMat);
+        cockpit.position.set(0, 0.3, -0.2);
+        shipGroup.add(cockpit);
+        
+        ship = shipGroup;
+        ship.position.set(0, 0, 0);
+        scene.add(ship);
+
+        // Background Starfield
+        const starsGeo = new THREE.BufferGeometry();
+        const starCount = 600;
+        const starPos = new Float32Array(starCount * 3);
+        for(let i=0; i<starCount*3; i+=3) {
+            starPos[i] = (Math.random() - 0.5) * 80;
+            starPos[i+1] = (Math.random() - 0.5) * 80;
+            starPos[i+2] = -Math.random() * 150;
+        }
+        starsGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+        const starsMat = new THREE.PointsMaterial({color: 0xffffff, size: 0.6});
+        const starField = new THREE.Points(starsGeo, starsMat);
+        scene.add(starField);
+
+        window.addEventListener('resize', () => {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+
+        window.addEventListener('keydown', (e) => {
+            if(e.key === 'ArrowUp') keyUp = true;
+            if(e.key === 'ArrowDown') keyDown = true;
+        });
+        window.addEventListener('keyup', (e) => {
+            if(e.key === 'ArrowUp') keyUp = false;
+            if(e.key === 'ArrowDown') keyDown = false;
+        });
+    }
+
+    function startGame() {
+        document.getElementById('intro').style.display = 'none';
+        gameActive = true;
+        initThree();
+        animate();
+        fetchDataLoop();
+    }
+
+    async function fetchDataLoop() {
+        if (!gameActive) return;
+        const threshold = document.getElementById('z-slider').value;
+        
+        try {
+            const res = await fetch('/engine', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({threshold, step})
+            });
+            const data = await res.json();
+            
+            const log = document.getElementById('log');
+            data.forEach(d => {
+                const isRock = d.status === 'false_negative' || (d.z_score > 3.0);
+                spawnObstacle(isRock, d.status);
+
+                if (d.status === 'false_positive') { 
+                    fuel -= 4; 
+                    log.innerHTML = `<div class="fp">⚡ False Positive (Z: ${d.z_score.toFixed(2)}) - Fuel -4%</div>` + log.innerHTML; 
+                } else if (d.status === 'false_negative') { 
+                    hull -= 15; 
+                    log.innerHTML = `<div class="fn">💥 False Negative (Z: ${d.z_score.toFixed(2)}) - Hull -15%</div>` + log.innerHTML; 
+                } else { 
+                    log.innerHTML = `<div class="ok">✔ Clean Data Stream (Z: ${d.z_score.toFixed(2)})</div>` + log.innerHTML; 
+                }
+            });
+            
+            document.getElementById('fuel-bar').style.width = Math.max(0, fuel) + '%';
+            document.getElementById('hull-bar').style.width = Math.max(0, hull) + '%';
+            
+            if (fuel <= 0 || hull <= 0) {
+                gameActive = false;
+                alert(fuel <= 0 ? "MISSION FAILED: Out of Fuel from filtering noise!" : "MISSION FAILED: Ship destroyed by unfiltered asteroid!");
+                location.reload();
+            }
+        } catch(err) {
+            console.log("Backend sync waiting...");
+        }
+        
+        step += 3;
+        setTimeout(fetchDataLoop, 1500);
+    }
+
+    function spawnObstacle(isAsteroid, status) {
+        const geo = isAsteroid ? new THREE.DodecahedronGeometry(1.2, 1) : new THREE.SphereGeometry(0.5, 8, 8);
+        const mat = new THREE.MeshStandardMaterial({ 
+            color: isAsteroid ? 0xff3366 : 0x00f3ff, 
+            roughness: 0.8,
+            wireframe: !isAsteroid 
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 6, -60);
+        scene.add(mesh);
+        obstacles.push({ mesh, status });
+    }
+
+    animate = function() {
+        if (!gameActive) return;
+        requestAnimationFrame(animate);
+
+        if (keyUp && ship.position.y < 4) ship.position.y += 0.1;
+        if (keyDown && ship.position.y > -4) ship.position.y -= 0.1;
+
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+            let obs = obstacles[i];
+            obs.mesh.position.z += 0.8;
+            obs.mesh.rotation.x += 0.02;
+            obs.mesh.rotation.y += 0.03;
+
+            if (obs.mesh.position.z > 5) {
+                scene.remove(obs.mesh);
+                obstacles.splice(i, 1);
+            }
+        }
+
+        renderer.render(scene, camera);
+    };
+</script>
+</body>
+</html>
